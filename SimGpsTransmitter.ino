@@ -38,6 +38,7 @@ static String serverIP="1.2.3.4";
 // Pins where GPS and SIM modules are connected
 static const int SimRXPin = 5, SimTXPin = 6;
 static const int GPSRXPin = 4, GPSTXPin = 3;
+static const int ErrorPin = 10, SimConnectionPin = 12;
 
 // Used baud rates (define based on used modules)
 static const uint32_t SimBaudrate = 9600;
@@ -47,14 +48,24 @@ static const uint32_t SerialBaudrate = 9600;
 // How frequently we want to send the location (milliseconds)
 static const unsigned long frequency = 15000;
 
+// Maximum time to wait SIM module for response
+static long maxResponseTime = 30000;
+
 String responseString;
 TinyGPSPlus gps;
 unsigned long previous=0;
+unsigned long beltTime;
 SoftwareSerial sim_ss(SimRXPin, SimTXPin);
 SoftwareSerial gps_ss(GPSRXPin, GPSTXPin);
 
 void setup()
 {
+  // Initialize status pins
+  pinMode(ErrorPin, OUTPUT);
+  pinMode(SimConnectionPin, OUTPUT);
+  digitalWrite(ErrorPin, LOW);
+  digitalWrite(SimConnectionPin, LOW);
+  
   /*
    * Start serial communications. We can only listen to one ss at a time so changing that 
    * between sim and gps as needed
@@ -73,36 +84,59 @@ void setup()
   sim_ss.println("AT");
   // Wait until module is connected and ready
   waitUntilResponse("SMS Ready");
+  blinkLed(SimConnectionPin);
   
 
   // Full mode
   sim_ss.println("AT+CFUN=1");
   waitUntilResponse("OK");
+  blinkLed(SimConnectionPin);
+  
   // Set credentials (TODO username and password are not configurable from variables). This may work without CSTT and CIICR but sometimes it caused error without them even though APN is given by SAPBR 
   sim_ss.write("AT+CSTT=\"");
   sim_ss.print(apn);
   sim_ss.write("\",\"\",\"\"\r\n");
   waitUntilResponse("OK");
+  blinkLed(SimConnectionPin);
+  
   // Connect and get IP
   sim_ss.println("AT+CIICR");
   waitUntilResponse("OK");
+  blinkLed(SimConnectionPin);
+  
   // Some more credentials
   sim_ss.write("AT+SAPBR=3,1,\"APN\",\"");
   sim_ss.print(apn);
   sim_ss.write("\"\r\n");
   waitUntilResponse("OK");
+  blinkLed(SimConnectionPin);
+  
   sim_ss.println("AT+SAPBR=3,1,\"USER\",\"\"");
   waitUntilResponse("OK");
+  blinkLed(SimConnectionPin);
+  
   sim_ss.println("AT+SAPBR=3,1,\"PWD\",\"\"");
   waitUntilResponse("OK");
+  blinkLed(SimConnectionPin);
+  
   sim_ss.println("AT+SAPBR=1,1");
   waitUntilResponse("OK");
+  blinkLed(SimConnectionPin);
+  
   sim_ss.println("AT+HTTPINIT");
   waitUntilResponse("OK");
+  digitalWrite(SimConnectionPin, HIGH);
 
   gps_ss.listen();
   previous = millis();
   Serial.println("starting loop!");
+}
+
+void blinkLed(int led)
+{
+  digitalWrite(led, HIGH);
+  delay(20);
+  digitalWrite(led, LOW);
 }
 
 /*
@@ -110,11 +144,30 @@ void setup()
  * */
 void waitUntilResponse(String response)
 {
+  beltTime = millis();
   responseString="";
-  while(responseString.indexOf(response) < 0)
+  String totalResponse = "";
+  while(responseString.indexOf(response) < 0 && millis() - beltTime < maxResponseTime)
   {
     readResponse();
+    totalResponse = totalResponse + responseString;
     Serial.println(responseString);
+  }
+
+  if(totalResponse.length() <= 0)
+  {
+    Serial.println("No response from the module. Check wiring, SIM-card and power!");
+    digitalWrite(ErrorPin, HIGH);
+    delay(30000);
+    exit(0); // No way to recover
+  }
+  else if (responseString.indexOf(response) < 0)
+  {
+    Serial.println("Unexpected response from the module");
+    Serial.println(totalResponse);
+    digitalWrite(ErrorPin, HIGH);
+    delay(30000);
+    exit(0); // No way to recover
   }
 }
 
@@ -127,6 +180,11 @@ void readResponse()
   while(responseString.length() <= 0 || !responseString.endsWith("\n"))
   {
     tryToRead();
+
+    if(millis() - beltTime > maxResponseTime)
+    {
+      return;
+    }
   }
 }
 
@@ -163,6 +221,7 @@ void logInfo()
   if(!gps.location.isValid())
   {
     Serial.println("Not a valid location. Waiting for satelite data.");
+    blinkLed(ErrorPin);
     return;
   }
 
@@ -182,8 +241,10 @@ void logInfo()
     url += "\"";
     sim_ss.println(url);
     waitUntilResponse("OK");
+    digitalWrite(SimConnectionPin, LOW);
     sim_ss.println("AT+HTTPACTION=0");
     waitUntilResponse("+HTTPACTION:");
+    digitalWrite(SimConnectionPin, HIGH);
     gps_ss.listen();
   }
 }
